@@ -1,0 +1,164 @@
+name: Promotion PRs with Categorization Development Branch
+
+on:
+  push:
+    branches:
+      - development
+      - pre-production
+
+jobs:
+  manage-prs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed to diff across branches
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      # 1) Decide source/target/title
+      - name: Set branch variables
+        id: vars
+        run: |
+          SOURCE_BRANCH="${GITHUB_REF_NAME}"
+          YEAR=$(date +'%Y')
+          MONTH=$(date +'%m')   # yields 2025.08 etc
+
+          if [ "$SOURCE_BRANCH" = "development" ]; then
+            TARGET_BRANCH="pre-production"
+            TITLE="Development -> Pre-Production [${YEAR}.${MONTH}]"
+          elif [ "$SOURCE_BRANCH" = "pre-production" ]; then
+            TARGET_BRANCH="production"
+            TITLE="Pre-Production -> Production [${YEAR}.${MONTH}]"
+          else
+            echo "Unsupported branch: $SOURCE_BRANCH"
+            exit 1
+          fi
+
+          echo "source=$SOURCE_BRANCH" >> $GITHUB_OUTPUT
+          echo "target=$TARGET_BRANCH" >> $GITHUB_OUTPUT
+          echo "title=$TITLE" >> $GITHUB_OUTPUT
+
+      # 2) Find existing PR source -> target
+      - name: Find existing PR
+        id: find_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          prs_json=$(gh pr list \
+            --base "${{ steps.vars.outputs.target }}" \
+            --head "${{ steps.vars.outputs.source }}" \
+            --state open --json number)
+          if [ "$(echo "$prs_json" | jq 'length')" -gt 0 ]; then
+            pr_number=$(echo "$prs_json" | jq -r '.[0].number')
+            echo "pr_number=$pr_number" >> $GITHUB_OUTPUT
+          fi
+
+      # 3) Compute changed files between branches (triple-dot = what's ahead on source)
+      - name: Get changed files between branches
+        run: |
+          git fetch origin "${{ steps.vars.outputs.target }}:${{ steps.vars.outputs.target }}" || true
+          git fetch origin "${{ steps.vars.outputs.source }}:${{ steps.vars.outputs.source }}" || true
+          git diff --name-only "origin/${{ steps.vars.outputs.target }}"..."origin/${{ steps.vars.outputs.source }}" > changed_files.txt || true
+          cat changed_files.txt || true
+
+      # 4) Categorize files
+      - name: Categorize files
+        id: categorize
+        run: |
+          # tweak patterns to match your repo structure
+          docs=$(grep -E '^(docs/|README\.md)' changed_files.txt || true)
+          tests=$(grep -E '(^|/)(tests?|__tests__)(/|$)|(^|/)test_.*|.*_test\.' changed_files.txt || true)
+          ci=$(grep -E '^(\.github/|ci/|\.circleci/|\.gitlab-ci\.yml$)' changed_files.txt || true)
+          code=$(grep -Ev '^(docs/|README\.md|\.github/|ci/|\.circleci/)|(^|/)(tests?|__tests__)(/|$)|(^|/)test_.*|.*_test\.' changed_files.txt || true)
+
+          echo "docs<<EOF" >> $GITHUB_OUTPUT
+          echo "$docs" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "tests<<EOF" >> $GITHUB_OUTPUT
+          echo "$tests" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "ci<<EOF" >> $GITHUB_OUTPUT
+          echo "$ci" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "code<<EOF" >> $GITHUB_OUTPUT
+          echo "$code" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # 5) Build the categorization block safely (heredoc)
+      - name: Build categorization block
+        id: block
+        run: |
+          cat > categorization.md <<'EOF'
+          ## Auto Categorized Changes
+
+          - 📚 Docs:
+
+          - 🧪 Tests:
+
+          - ⚙️ Code:
+          EOF
+
+          # Safely substitute placeholders (escape / and & for sed)
+          esc () { printf "%s" "$1" | sed -e 's/[\/&]/\\&/g'; }
+          sed -i "s/__DOCS__/$(esc "${{ steps.categorize.outputs.docs }}")/g" categorization.md
+          sed -i "s/__TESTS__/$(esc "${{ steps.categorize.outputs.tests }}")/g" categorization.md
+          sed -i "s/__CI__/$(esc "${{ steps.categorize.outputs.ci }}")/g" categorization.md
+          sed -i "s/__CODE__/$(esc "${{ steps.categorize.outputs.code }}")/g" categorization.md
+
+          echo "path=categorization.md" >> $GITHUB_OUTPUT
+
+      # 6) Create or update PR with template + fresh categorization (overwrite section)
+      - name: Create or Update PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Body template via heredoc (prevents YAML parse issues with <!-- -->)
+          cat <<'EOF' > template.md
+          ## Description
+          <!-- What does this PR change? Why? -->
+
+          ## Category of Changes
+          - [ ] 📝 Documentation
+          - [ ] 🧪 Tests
+          - [ ] ⚙️ Code (logic/feature)
+          - [ ] ♻️ Refactor
+          - [ ] 🔧 Config/CI
+
+          ---
+          EOF
+
+          if [ -n "${{ steps.find_pr.outputs.pr_number }}" ]; then
+            echo "Updating existing PR #${{ steps.find_pr.outputs.pr_number }}"
+            body=$(gh pr view ${{ steps.find_pr.outputs.pr_number }} --json body -q .body || echo "")
+            # Strip old categorization if present
+            cleaned=$(printf "%s" "$body" | sed '/^## Auto Categorized Changes/,$d')
+            {
+              printf "%s\n\n" "$cleaned"
+              cat "${{ steps.block.outputs.path }}"
+            } > body.txt
+
+            gh pr edit ${{ steps.find_pr.outputs.pr_number }} \
+              --title "${{ steps.vars.outputs.title }}" \
+              --body-file body.txt
+          else
+            echo "Creating new PR from ${{ steps.vars.outputs.source }} -> ${{ steps.vars.outputs.target }}"
+            {
+              cat template.md
+              printf "\n"
+              cat "${{ steps.block.outputs.path }}"
+            } > body.txt
+
+            gh pr create \
+              --base "${{ steps.vars.outputs.target }}" \
+              --head "${{ steps.vars.outputs.source }}" \
+              --title "${{ steps.vars.outputs.title }}" \
+              --body-file body.txt
+          fi
