@@ -3,7 +3,6 @@ name: Promotion PRs with Categorization
 on:
   push:
     branches:
-      - master
       - development
       - pre-production
 
