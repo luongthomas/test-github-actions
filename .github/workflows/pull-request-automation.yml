@@ -188,19 +188,19 @@ jobs:
           done
           cat changes.md >> $GITHUB_STEP_SUMMARY
 
+
       - name: Create or Update Pull Request
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ env.BRANCH_NAME }}
+          branch: ${{ github.ref_name }}
           base: ${{ env.BASE_BRANCH }}
           title: ${{ env.PR_TITLE }}
           body: |
             ## Description
             <!-- What does this PR change? Why? -->
 
-            ## Auto Categorized Changes
-            $(cat changes.md)
+            ${{ steps.changes.outputs.files }}
           draft: false
 
       # # 6) Create or update PR with template + fresh categorization (overwrite section)
