@@ -2,4 +2,4 @@ print("test auto 123")
 
 print("sfad")
 
-print("B")
+print("C")
