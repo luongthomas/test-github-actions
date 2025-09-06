@@ -137,11 +137,24 @@ jobs:
             else
                 echo "changed_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }} | xargs)" >> $GITHUB_OUTPUT
             fi
+      # above will always run the ELSE statement because we're not triggering the workflow with a PULL REQUEST
+      # it is doing a git diff between event.before and event.after
+
+      # This one seems to work
       - name: List changed files
         run: |
             for file in ${{ steps.changed-files.outputs.changed_files }}; do
                 echo "$file was changed"
             done
+
+      - name: List changed files with commit message
+        run: |
+          for file in ${{ steps.changed-files.outputs.changed_files }}; do
+            # Get latest commit message for this file
+            message=$(git log -1 --pretty=format:"%s" -- "$file")
+            echo "$file — $message"
+          done
+
 
       # Get changed files alternative
       - uses: actions/checkout@v2
