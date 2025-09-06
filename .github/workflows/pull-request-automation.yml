@@ -121,20 +121,20 @@ jobs:
       #     git diff --name-only "origin/${{ steps.vars.outputs.target }}"..."origin/${{ steps.vars.outputs.source }}" > changed_files.txt || true
       #     cat changed_files.txt || true
 
-      # # test stackoverflow flow
-      # - uses: actions/checkout@v3
-      #   with:
-      #       fetch-depth: ${{ github.event_name == 'pull_request' && 1 }}
-      # - name: Get changed files
-      #   id: changed-files
-      #   run: |
-      #       if ${{ github.event_name == 'pull_request' }}; then
-      #           echo "changed_files=$(git diff --name-only -r HEAD^1 HEAD | xargs)" >> $GITHUB_OUTPUT
-      #       else
-      #           echo "changed_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }} | xargs)" >> $GITHUB_OUTPUT
-      #       fi
-      # # above will always run the ELSE statement because we're not triggering the workflow with a PULL REQUEST
-      # # it is doing a git diff between event.before and event.after
+      # test stackoverflow flow
+      - uses: actions/checkout@v3
+        with:
+            fetch-depth: ${{ github.event_name == 'pull_request' && 1 }}
+      - name: Get changed files
+        id: changed-files
+        run: |
+            if ${{ github.event_name == 'pull_request' }}; then
+                echo "changed_files=$(git diff --name-only -r HEAD^1 HEAD | xargs)" >> $GITHUB_OUTPUT
+            else
+                echo "changed_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }} | xargs)" >> $GITHUB_OUTPUT
+            fi
+      # above will always run the ELSE statement because we're not triggering the workflow with a PULL REQUEST
+      # it is doing a git diff between event.before and event.after
 
       # # This one seems to work
       # - name: List changed files
@@ -143,13 +143,13 @@ jobs:
       #           echo "$file was changed"
       #       done
 
-      # - name: List changed files with commit message
-      #   run: |
-      #     for file in ${{ steps.changed-files.outputs.changed_files }}; do
-      #       # Get latest commit message for this file
-      #       message=$(git log -1 --pretty=format:"%s" -- "$file")
-      #       echo "$file — $message"
-      #     done
+      - name: List changed files with commit message
+        run: |
+          for file in ${{ steps.changed-files.outputs.changed_files }}; do
+            # Get latest commit message for this file
+            message=$(git log -1 --pretty=format:"%s" -- "$file")
+            echo "$file — $message"
+          done
 
 
       # # Get changed files alternative
@@ -165,24 +165,17 @@ jobs:
       #     if [ $current_commit == $last_deps_mod_commit ]; then echo USE_LOCK=0 > ci.conf; else echo USE_LOCK=1 > ci.conf; fi
 
 
-      - name: Collect Changed Files
+      - name: Generate PR body
         id: changes
         run: |
-          echo "### Auto Categorized Changes" > changes.md
-          echo "" >> changes.md
-          git fetch origin ${{ env.BASE_BRANCH }} --depth=1
-          git diff --name-only origin/${{ env.BASE_BRANCH }}...HEAD | while read file; do
-            if [[ $file == *.py ]]; then
-              echo "- 🐍 Python: $file" >> changes.md
-            elif [[ $file == *.js ]]; then
-              echo "- 📜 JavaScript: $file" >> changes.md
-            elif [[ $file == *.yml || $file == *.yaml ]]; then
-              echo "- ⚙️ Config: $file" >> changes.md
-            else
-              echo "- 📂 Other: $file" >> changes.md
-            fi
+          BODY=""
+          for file in ${{ steps.changed-files.outputs.changed_files }}; do
+            MSG=$(git log -1 --pretty=format:"%s" -- "$file")
+            BODY+="\n- $file → $MSG"
           done
-          cat changes.md >> $GITHUB_STEP_SUMMARY
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
 
       - name: Create or Update Pull Request
@@ -192,12 +185,7 @@ jobs:
           branch: ${{ env.HEAD_BRANCH }}
           base: ${{ env.BASE_BRANCH }}
           title: ${{ env.PR_TITLE }}
-          body: |
-            ## Description
-            <!-- What does this PR change? Why? -->
-
-            ${{ steps.changes.outputs.files }}
-          draft: false
+          body: ${{ steps.changes.outputs.body }}
 
       # # 6) Create or update PR with template + fresh categorization (overwrite section)
       # - name: Create or Update PR
