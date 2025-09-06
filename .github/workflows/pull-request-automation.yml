@@ -121,48 +121,48 @@ jobs:
       #     git diff --name-only "origin/${{ steps.vars.outputs.target }}"..."origin/${{ steps.vars.outputs.source }}" > changed_files.txt || true
       #     cat changed_files.txt || true
 
-      # test stackoverflow flow
-      - uses: actions/checkout@v3
-        with:
-            fetch-depth: ${{ github.event_name == 'pull_request' && 1 }}
-      - name: Get changed files
-        id: changed-files
-        run: |
-            if ${{ github.event_name == 'pull_request' }}; then
-                echo "changed_files=$(git diff --name-only -r HEAD^1 HEAD | xargs)" >> $GITHUB_OUTPUT
-            else
-                echo "changed_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }} | xargs)" >> $GITHUB_OUTPUT
-            fi
-      # above will always run the ELSE statement because we're not triggering the workflow with a PULL REQUEST
-      # it is doing a git diff between event.before and event.after
+      # # test stackoverflow flow
+      # - uses: actions/checkout@v3
+      #   with:
+      #       fetch-depth: ${{ github.event_name == 'pull_request' && 1 }}
+      # - name: Get changed files
+      #   id: changed-files
+      #   run: |
+      #       if ${{ github.event_name == 'pull_request' }}; then
+      #           echo "changed_files=$(git diff --name-only -r HEAD^1 HEAD | xargs)" >> $GITHUB_OUTPUT
+      #       else
+      #           echo "changed_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }} | xargs)" >> $GITHUB_OUTPUT
+      #       fi
+      # # above will always run the ELSE statement because we're not triggering the workflow with a PULL REQUEST
+      # # it is doing a git diff between event.before and event.after
 
-      # This one seems to work
-      - name: List changed files
-        run: |
-            for file in ${{ steps.changed-files.outputs.changed_files }}; do
-                echo "$file was changed"
-            done
+      # # This one seems to work
+      # - name: List changed files
+      #   run: |
+      #       for file in ${{ steps.changed-files.outputs.changed_files }}; do
+      #           echo "$file was changed"
+      #       done
 
-      - name: List changed files with commit message
-        run: |
-          for file in ${{ steps.changed-files.outputs.changed_files }}; do
-            # Get latest commit message for this file
-            message=$(git log -1 --pretty=format:"%s" -- "$file")
-            echo "$file — $message"
-          done
+      # - name: List changed files with commit message
+      #   run: |
+      #     for file in ${{ steps.changed-files.outputs.changed_files }}; do
+      #       # Get latest commit message for this file
+      #       message=$(git log -1 --pretty=format:"%s" -- "$file")
+      #       echo "$file — $message"
+      #     done
 
 
-      # Get changed files alternative
-      - uses: actions/checkout@v2
-        with:
-          fetch-depth: 0
-      - name: (CI) Dependencies update check
-        run: |
-          current_commit=`git log -n 1 --pretty=format:%H`
-          echo $current_commit
-          last_deps_mod_commit=`git log -n 1 --pretty=format:%H -- composer.json`
-          echo $last_deps_mod_commit
-          if [ $current_commit == $last_deps_mod_commit ]; then echo USE_LOCK=0 > ci.conf; else echo USE_LOCK=1 > ci.conf; fi
+      # # Get changed files alternative
+      # - uses: actions/checkout@v2
+      #   with:
+      #     fetch-depth: 0
+      # - name: (CI) Dependencies update check
+      #   run: |
+      #     current_commit=`git log -n 1 --pretty=format:%H`
+      #     echo $current_commit
+      #     last_deps_mod_commit=`git log -n 1 --pretty=format:%H -- composer.json`
+      #     echo $last_deps_mod_commit
+      #     if [ $current_commit == $last_deps_mod_commit ]; then echo USE_LOCK=0 > ci.conf; else echo USE_LOCK=1 > ci.conf; fi
 
 
       - name: Collect Changed Files
