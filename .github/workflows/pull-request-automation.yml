@@ -80,27 +80,23 @@ jobs:
           sudo apt-get install -y jq
 
       # 1) Decide source/target/title
-      - name: Set branch variables
+      - name: Set PR variables
         id: vars
         run: |
-          SOURCE_BRANCH="${GITHUB_REF_NAME}"
-          YEAR=$(date +'%Y')
-          MONTH=$(date +'%m')   # yields 2025.08 etc
-
-          if [ "$SOURCE_BRANCH" = "development" ]; then
-            TARGET_BRANCH="pre-production"
-            TITLE="Development -> Pre-Production [${YEAR}.${MONTH}]"
-          elif [ "$SOURCE_BRANCH" = "pre-production" ]; then
-            TARGET_BRANCH="production"
-            TITLE="Pre-Production -> Production [${YEAR}.${MONTH}]"
+          DATE=$(date +'%Y.%m')
+          if [[ "${GITHUB_REF_NAME}" == "development" ]]; then
+            echo "HEAD_BRANCH=development" >> $GITHUB_ENV
+            echo "BASE_BRANCH=pre-production" >> $GITHUB_ENV
+            echo "PR_TITLE=Development -> Pre-Production [$DATE]" >> $GITHUB_ENV
+          elif [[ "${GITHUB_REF_NAME}" == "pre-production" ]]; then
+            echo "HEAD_BRANCH=pre-production" >> $GITHUB_ENV
+            echo "BASE_BRANCH=production" >> $GITHUB_ENV
+            echo "PR_TITLE=Pre-Production -> Production [$DATE]" >> $GITHUB_ENV
           else
-            echo "Unsupported branch: $SOURCE_BRANCH"
-            exit 1
+            echo "HEAD_BRANCH=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+            echo "BASE_BRANCH=main" >> $GITHUB_ENV
+            echo "PR_TITLE=${GITHUB_REF_NAME} update [$DATE]" >> $GITHUB_ENV
           fi
-
-          echo "source=$SOURCE_BRANCH" >> $GITHUB_OUTPUT
-          echo "target=$TARGET_BRANCH" >> $GITHUB_OUTPUT
-          echo "title=$TITLE" >> $GITHUB_OUTPUT
 
       # 2) Find existing PR source -> target
       - name: Find existing PR
@@ -193,7 +189,7 @@ jobs:
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ github.ref_name }}
+          branch: ${{ env.HEAD_BRANCH }}
           base: ${{ env.BASE_BRANCH }}
           title: ${{ env.PR_TITLE }}
           body: |
