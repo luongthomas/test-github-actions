@@ -1,4 +1,4 @@
-name: Promotion PRs with Categorization Development Branch
+name: Promotion PRs (development/pre-production)
 
 on:
   push:
@@ -9,79 +9,23 @@ on:
 jobs:
   manage-prs:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
     steps:
-      # - name: Check out repository
-      #   uses: actions/checkout@v4
-
-      # - name: Get branch name
-      #   run: echo "BRANCH_NAME=${GITHUB_REF#refs/heads/}" >> $GITHUB_ENV
-
-      # - name: Set PR Title
-      #   id: pr_title
-      #   run: |
-      #     DATE=$(date +'%Y.%m')
-      #     if [[ "${{ env.BRANCH_NAME }}" == "development" ]]; then
-      #       echo "PR_TITLE=Development -> Pre-Production [$DATE]" >> $GITHUB_ENV
-      #       echo "BASE_BRANCH=pre-production" >> $GITHUB_ENV
-      #     elif [[ "${{ env.BRANCH_NAME }}" == "pre-production" ]]; then
-      #       echo "PR_TITLE=Pre-Production -> Production [$DATE]" >> $GITHUB_ENV
-      #       echo "BASE_BRANCH=production" >> $GITHUB_ENV
-      #     else
-      #       echo "PR_TITLE=${{ env.BRANCH_NAME }} update [$DATE]" >> $GITHUB_ENV
-      #       echo "BASE_BRANCH=main" >> $GITHUB_ENV
-      #     fi
-      # - name: Collect Changed Files
-      #   id: changes
-      #   run: |
-      #     echo "### Auto Categorized Changes" > changes.md
-      #     echo "" >> changes.md
-      #     git fetch origin ${{ env.BASE_BRANCH }} --depth=1
-      #     git diff --name-only origin/${{ env.BASE_BRANCH }}...HEAD | while read file; do
-      #       if [[ $file == *.py ]]; then
-      #         echo "- 🐍 Python: $file" >> changes.md
-      #       elif [[ $file == *.js ]]; then
-      #         echo "- 📜 JavaScript: $file" >> changes.md
-      #       elif [[ $file == *.yml || $file == *.yaml ]]; then
-      #         echo "- ⚙️ Config: $file" >> changes.md
-      #       else
-      #         echo "- 📂 Other: $file" >> changes.md
-      #       fi
-      #     done
-      #     # Save to output so we can reuse later
-      #     CONTENT=$(cat changes.md)
-      #     echo "content<<EOF" >> $GITHUB_OUTPUT
-      #     echo "$CONTENT" >> $GITHUB_OUTPUT
-      #     echo "EOF" >> $GITHUB_OUTPUT
-
-      # - name: Create or Update Pull Request
-      #   uses: peter-evans/create-pull-request@v6
-      #   with:
-      #     token: ${{ secrets.GITHUB_TOKEN }}
-      #     branch: ${{ env.BRANCH_NAME }}
-      #     base: ${{ env.BASE_BRANCH }}
-      #     title: ${{ env.PR_TITLE }}
-      #     body: |
-      #       ## Description
-      #       <!-- What does this PR change? Why? -->
-
-      #       ${{ steps.changes.outputs.content }}
-      #     draft: false
-
-
-
-      - name: Checkout
+      - name: Checkout (full history for cross-branch diff)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # needed to diff across branches
+          fetch-depth: 0
 
       - name: Install jq
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
 
-      # 1) Decide source/target/title
+      # 1) Decide source/target/title (store in env)
       - name: Set PR variables
-        id: vars
         run: |
           DATE=$(date +'%Y.%m')
           if [[ "${GITHUB_REF_NAME}" == "development" ]]; then
@@ -93,144 +37,81 @@ jobs:
             echo "BASE_BRANCH=production" >> $GITHUB_ENV
             echo "PR_TITLE=Pre-Production -> Production [$DATE]" >> $GITHUB_ENV
           else
-            echo "HEAD_BRANCH=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-            echo "BASE_BRANCH=main" >> $GITHUB_ENV
-            echo "PR_TITLE=${GITHUB_REF_NAME} update [$DATE]" >> $GITHUB_ENV
+            echo "Unsupported source branch: ${GITHUB_REF_NAME}"
+            exit 1
           fi
 
-      # 2) Find existing PR source -> target
-      - name: Find existing PR
+      - name: Fetch both branches
+        run: |
+          git fetch --prune origin
+          # Make sure both refs exist locally
+          git show-ref --verify --quiet "refs/remotes/origin/${HEAD_BRANCH}" || (echo "Missing origin/${HEAD_BRANCH}" && exit 1)
+          git show-ref --verify --quiet "refs/remotes/origin/${BASE_BRANCH}" || (echo "Missing origin/${BASE_BRANCH}" && exit 1)
+
+      # 2) Compute changed files: everything ahead on HEAD_BRANCH vs BASE_BRANCH
+      - name: Get changed files (target...source)
+        id: changed
+        run: |
+          git diff --name-only "origin/${BASE_BRANCH}"..."origin/${HEAD_BRANCH}" > changed_files.txt || true
+          echo "count=$(wc -l < changed_files.txt | tr -d ' ')" >> $GITHUB_OUTPUT
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          cat changed_files.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "DEBUG changed files:"; cat changed_files.txt || true
+
+      # 3) Exit early if no diff (prevents “no differences” confusion)
+      - name: Skip if no differences
+        if: ${{ steps.changed.outputs.count == '0' }}
+        run: |
+          echo "No differences between origin/${BASE_BRANCH} and origin/${HEAD_BRANCH}. Nothing to PR."
+          exit 0
+
+      # 4) Build body with “latest commit message per file”
+      - name: Generate PR body
+        id: body
+        run: |
+          BODY="## Description
+            <!-- What does this PR change? Why? -->
+
+            ## Changed files (latest commit per file)"
+
+          while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            msg=$(git log -1 --pretty=format:"%s" -- "$f" 2>/dev/null || echo "")
+            BODY+="\n- $f — $msg"
+          done < changed_files.txt
+
+          echo "text<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # 5) Create or update PR using gh (real branch→branch PRs)
+      - name: Find existing PR (HEAD -> BASE)
         id: find_pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          prs_json=$(gh pr list \
-            --base "${{ steps.vars.outputs.target }}" \
-            --head "${{ steps.vars.outputs.source }}" \
-            --state open --json number)
-          if [ "$(echo "$prs_json" | jq 'length')" -gt 0 ]; then
-            pr_number=$(echo "$prs_json" | jq -r '.[0].number')
-            echo "pr_number=$pr_number" >> $GITHUB_OUTPUT
+          prs=$(gh pr list --base "${BASE_BRANCH}" --head "${HEAD_BRANCH}" --state open --json number,title)
+          if [ "$(echo "$prs" | jq 'length')" -gt 0 ]; then
+            echo "number=$(echo "$prs" | jq -r '.[0].number')" >> $GITHUB_OUTPUT
           fi
 
-      # 3) Compute changed files between branches (triple-dot = what's ahead on source)
-      # - name: Get changed files between branches
-      #   run: |
-      #     git fetch origin "${{ steps.vars.outputs.target }}:${{ steps.vars.outputs.target }}" || true
-      #     git fetch origin "${{ steps.vars.outputs.source }}:${{ steps.vars.outputs.source }}" || true
-      #     git diff --name-only "origin/${{ steps.vars.outputs.target }}"..."origin/${{ steps.vars.outputs.source }}" > changed_files.txt || true
-      #     cat changed_files.txt || true
-
-      # test stackoverflow flow
-      - uses: actions/checkout@v3
-        with:
-            fetch-depth: ${{ github.event_name == 'pull_request' && 1 }}
-      - name: Get changed files
-        id: changed-files
+      - name: Create PR if missing
+        if: ${{ steps.find_pr.outputs.number == '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-            if ${{ github.event_name == 'pull_request' }}; then
-                echo "changed_files=$(git diff --name-only -r HEAD^1 HEAD | xargs)" >> $GITHUB_OUTPUT
-            else
-                echo "changed_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }} | xargs)" >> $GITHUB_OUTPUT
-            fi
-      # above will always run the ELSE statement because we're not triggering the workflow with a PULL REQUEST
-      # it is doing a git diff between event.before and event.after
+          gh pr create \
+            --base "${BASE_BRANCH}" \
+            --head "${HEAD_BRANCH}" \
+            --title "${PR_TITLE}" \
+            --body  "${{ steps.body.outputs.text }}"
 
-      # # This one seems to work
-      # - name: List changed files
-      #   run: |
-      #       for file in ${{ steps.changed-files.outputs.changed_files }}; do
-      #           echo "$file was changed"
-      #       done
-
-      - name: List changed files with commit message
+      - name: Update existing PR (title + overwrite body)
+        if: ${{ steps.find_pr.outputs.number != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for file in ${{ steps.changed-files.outputs.changed_files }}; do
-            # Get latest commit message for this file
-            message=$(git log -1 --pretty=format:"%s" -- "$file")
-            echo "$file — $message"
-          done
-
-
-      # # Get changed files alternative
-      # - uses: actions/checkout@v2
-      #   with:
-      #     fetch-depth: 0
-      # - name: (CI) Dependencies update check
-      #   run: |
-      #     current_commit=`git log -n 1 --pretty=format:%H`
-      #     echo $current_commit
-      #     last_deps_mod_commit=`git log -n 1 --pretty=format:%H -- composer.json`
-      #     echo $last_deps_mod_commit
-      #     if [ $current_commit == $last_deps_mod_commit ]; then echo USE_LOCK=0 > ci.conf; else echo USE_LOCK=1 > ci.conf; fi
-
-
-      - name: Generate PR body
-        id: changes
-        run: |
-          BODY=""
-          for file in ${{ steps.changed-files.outputs.changed_files }}; do
-            MSG=$(git log -1 --pretty=format:"%s" -- "$file")
-            BODY+="\n- $file → $MSG"
-          done
-          echo "body<<EOF" >> $GITHUB_OUTPUT
-          echo -e "$BODY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-
-      - name: Create or Update Pull Request
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ env.HEAD_BRANCH }}
-          base: ${{ env.BASE_BRANCH }}
-          title: ${{ env.PR_TITLE }}
-          body: ${{ steps.changes.outputs.body }}
-
-      # # 6) Create or update PR with template + fresh categorization (overwrite section)
-      # - name: Create or Update PR
-      #   env:
-      #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      #   run: |
-      #     # Body template via heredoc (prevents YAML parse issues with <!-- -->)
-      #     cat <<'EOF' > template.md
-      #     ## Description
-      #     <!-- What does this PR change? Why? -->
-
-      #     ## Category of Changes
-      #     - [ ] 📝 Documentation
-      #     - [ ] 🧪 Tests
-      #     - [ ] ⚙️ Code (logic/feature)
-      #     - [ ] ♻️ Refactor
-      #     - [ ] 🔧 Config/CI
-
-      #     ---
-      #     EOF
-
-      #     if [ -n "${{ steps.find_pr.outputs.pr_number }}" ]; then
-      #       echo "Updating existing PR #${{ steps.find_pr.outputs.pr_number }}"
-      #       body=$(gh pr view ${{ steps.find_pr.outputs.pr_number }} --json body -q .body || echo "")
-      #       # Strip old categorization if present
-      #       cleaned=$(printf "%s" "$body" | sed '/^## Auto Categorized Changes/,$d')
-      #       {
-      #         printf "%s\n\n" "$cleaned"
-      #         cat "${{ steps.block.outputs.path }}"
-      #       } > body.txt
-
-      #       gh pr edit ${{ steps.find_pr.outputs.pr_number }} \
-      #         --title "${{ steps.vars.outputs.title }}" \
-      #         --body-file body.txt
-      #     else
-      #       echo "Creating new PR from ${{ steps.vars.outputs.source }} -> ${{ steps.vars.outputs.target }}"
-      #       {
-      #         cat template.md
-      #         printf "\n"
-      #         cat "${{ steps.block.outputs.path }}"
-      #       } > body.txt
-
-      #       gh pr create \
-      #         --base "${{ steps.vars.outputs.target }}" \
-      #         --head "${{ steps.vars.outputs.source }}" \
-      #         --title "${{ steps.vars.outputs.title }}" \
-      #         --body-file body.txt
-      #     fi
+          gh pr edit "${{ steps.find_pr.outputs.number }}" \
+            --title "${PR_TITLE}" \
+            --body  "${{ steps.body.outputs.text }}"
