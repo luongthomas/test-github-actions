@@ -67,20 +67,54 @@ jobs:
           exit 0
 
       # 4) Build body with “latest commit message per file”
-      - name: Generate PR body
+            # 4) Build body grouped by latest commit message per file
+      - name: Generate PR body (group by commit message)
         id: body
         run: |
-          BODY="## Description
-            <!-- What does this PR change? Why? -->
+          set -euo pipefail
 
-            ## Changed files (latest commit per file)"
+          # We'll group files by their latest commit subject line.
+          # To avoid escaping issues, we key groups by SHA1(msg) and store
+          # the actual message & file lists in temp files.
+          mkdir -p .grp_msgs .grp_files
+          ORDER=()  # preserve insertion order of unique messages
 
           while IFS= read -r f; do
             [[ -z "$f" ]] && continue
-            msg=$(git log -1 --pretty=format:"%s" -- "$f" 2>/dev/null || echo "")
-            BODY+="\n- $f — $msg"
+            # Latest commit subject that touched this file
+            msg=$(git log -1 --pretty=format:%s -- "$f" 2>/dev/null || echo "")
+            [[ -z "$msg" ]] && msg="(no commit message)"
+
+            # Hash of the message to use as a stable key
+            key=$(printf "%s" "$msg" | sha1sum | awk '{print $1}')
+
+            # Record the message text if first time seen
+            if [[ ! -f ".grp_msgs/$key.txt" ]]; then
+              printf "%s" "$msg" > ".grp_msgs/$key.txt"
+              ORDER+=("$key")
+            fi
+
+            # Append file to that group's list
+            printf "%s\n" "$f" >> ".grp_files/$key.txt"
           done < changed_files.txt
 
+          # Build the PR body
+          BODY="## Description
+          <!-- What does this PR change? Why? -->"
+
+          for key in "${ORDER[@]}"; do
+            msg=$(cat ".grp_msgs/$key.txt")
+            BODY+="
+            ## ${msg}"
+
+            # Deduplicate while preserving order
+            awk '!seen[$0]++' ".grp_files/$key.txt" | while IFS= read -r file; do
+              [[ -z "$file" ]] && continue
+              BODY+="- ${file}"
+            done
+          done
+
+          # Emit as step output
           echo "text<<EOF" >> $GITHUB_OUTPUT
           echo -e "$BODY" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
