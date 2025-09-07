@@ -75,7 +75,7 @@ jobs:
           set -euo pipefail
 
           mkdir -p .grp_msgs .grp_files
-          ORDER=()  # preserve message order
+          ORDER=()
 
           # Group files by their latest commit subject
           while IFS= read -r f; do
@@ -91,20 +91,23 @@ jobs:
             printf "%s\n" "$f" >> ".grp_files/$key.txt"
           done < changed_files.txt
 
-          BODY=$'## Description\n<!-- What does this PR change? Why? -->\n'
+          BODY=""
 
           for key in "${ORDER[@]}"; do
             msg=$(cat ".grp_msgs/$key.txt")
-            BODY+=$'\n\n## '"${msg}"$'\n'
+            BODY+=$'\n## '"${msg}"$'\n'
 
-            # Dedup while preserving order, then append in the current shell (no pipe!)
-            # Collect lines, then loop via a here-string to avoid subshell.
             deduped=$(awk '!seen[$0]++' ".grp_files/$key.txt" || true)
             while IFS= read -r file; do
               [[ -z "$file" ]] && continue
               BODY+=$'- '"${file}"$'\n'
             done <<< "$deduped"
+
+            BODY+=$'\n---\n'  # separator between groups
           done
+
+          # Remove trailing separator if present
+          BODY=$(echo "$BODY" | sed '${/^---$/d}')
 
           echo "text<<EOF" >> $GITHUB_OUTPUT
           printf "%s\n" "$BODY" >> $GITHUB_OUTPUT
