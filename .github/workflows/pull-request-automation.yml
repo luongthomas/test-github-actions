@@ -68,7 +68,7 @@ jobs:
 
       # 4) Build body with “latest commit message per file”
             # 4) Build body grouped by latest commit message per file
-      - name: Generate PR body (group by commit message)
+      - name: Generate PR body (group by commit message, with subsections)
         id: body
         shell: bash
         run: |
@@ -97,17 +97,54 @@ jobs:
             msg=$(cat ".grp_msgs/$key.txt")
             BODY+=$'\n## '"${msg}"$'\n'
 
+            # Deduplicate while preserving order
             deduped=$(awk '!seen[$0]++' ".grp_files/$key.txt" || true)
+
+            # Buckets
+            automations=()
+            playbooks=()
+            other=()
+
             while IFS= read -r file; do
               [[ -z "$file" ]] && continue
-              BODY+=$'- '"${file}"$'\n'
+              base="$(basename "$file")"
+              if [[ "$base" == automation* ]]; then
+                automations+=("$file")
+              elif [[ "$base" == playbook* ]]; then
+                playbooks+=("$file")
+              else
+                other+=("$file")
+              fi
             done <<< "$deduped"
 
-            BODY+=$'\n---\n'  # separator between groups
+            # Emit subsections only if they have entries
+            if (( ${#automations[@]} )); then
+              BODY+=$'\nAutomations:\n'
+              for f in "${automations[@]}"; do
+                BODY+=$'- '"${f}"$'\n'
+              done
+            fi
+
+            if (( ${#playbooks[@]} )); then
+              BODY+=$'\nPlaybooks:\n'
+              for f in "${playbooks[@]}"; do
+                BODY+=$'- '"${f}"$'\n'
+              done
+            fi
+
+            if (( ${#other[@]} )); then
+              BODY+=$'\nOther:\n'
+              for f in "${other[@]}"; do
+                BODY+=$'- '"${f}"$'\n'
+              done
+            fi
+
+            # Separator with TWO newlines after it
+            BODY+=$'\n---\n\n'
           done
 
-          # Remove trailing separator if present
-          BODY=$(echo "$BODY" | sed '${/^---$/d}')
+          # Remove trailing separator block if present (the final '---' and following blank lines)
+          BODY="$(printf '%s' "$BODY" | sed -E ':a;N;$!ba;s/\n---\n\n$//')"
 
           echo "text<<EOF" >> $GITHUB_OUTPUT
           printf "%s\n" "$BODY" >> $GITHUB_OUTPUT
