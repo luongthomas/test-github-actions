@@ -48,9 +48,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          YEAR=2025  # change to YEAR=$(date +'%Y') if you want it dynamic
+          YEAR=2025  # or: YEAR=$(date +'%Y')
 
-          # Direction + mirror setup
           if [[ "${HEAD_BRANCH}" == "development" ]]; then
             TITLE_PREFIX="Development -> Pre-Production"
             MIRROR_BASE="production"
@@ -64,19 +63,16 @@ jobs:
             exit 1
           fi
 
-          # 1) If a mirror PR is open, reuse its XX
-          mirror_title="$(gh pr list --base "$MIRROR_BASE" --head "$MIRROR_HEAD" --state open --json title -q '.[0].title' || true)"
-          if [[ -n "$mirror_title" ]]; then
-            if [[ "$mirror_title" =~ \[(${YEAR})\.([0-9]{2})\] ]]; then
-              XX="${BASH_REMATCH[2]}"
-              echo "Using mirror XX=${XX} from open PR: $mirror_title"
-              echo "PR_TITLE=${TITLE_PREFIX} [${YEAR}.${XX}]" >> $GITHUB_ENV
-              exit 0
-            fi
+          # 1) Mirror PR open? Reuse its XX
+          mirror_title="$(gh pr list --base "$MIRROR_BASE" --head "$MIRROR_HEAD" --state open --json title -q '.[0].title' 2>/dev/null || true)"
+          if [[ -n "$mirror_title" ]] && [[ "$mirror_title" =~ \[(${YEAR})\.([0-9]{2})\] ]]; then
+            XX="${BASH_REMATCH[2]}"
+            echo "PR_TITLE=${TITLE_PREFIX} [${YEAR}.${XX}]" >> $GITHUB_ENV
+            exit 0
           fi
 
-          # 2) Otherwise, find the latest promotion PR this year and increment its XX
-          #    We search PRs in this repo with titles containing [YEAR.??], newest first.
+          # 2) Otherwise: find most recent promotion PR in this repo with [YEAR.XX] and increment
+          # Try 'gh search prs' first; if not available, fall back to 'gh pr list'
           latest_title="$(
             gh search prs \
               --repo "$GITHUB_REPOSITORY" \
@@ -86,14 +82,21 @@ jobs:
               --sort created \
               --order desc \
               --jq '.[0].title // empty' \
-              -- "[${YEAR}.*]"
-            || true
+              -- "[${YEAR}.*]" 2>/dev/null || :
           )"
 
-          if [[ -n "$latest_title" && "$latest_title" =~ \[(${YEAR})\.([0-9]{2})\] ]]; then
+          if [[ -z "$latest_title" ]]; then
+            # Fallback: scan recent PR titles and grep the pattern
+            latest_title="$(
+              gh pr list --state all --limit 100 --json title --jq '.[].title' 2>/dev/null \
+              | grep -E "^\S.*\[$YEAR\.[0-9]{2}\]" \
+              | head -n1 || :
+            )"
+          fi
+
+          if [[ -n "$latest_title" ]] && [[ "$latest_title" =~ \[(${YEAR})\.([0-9]{2})\] ]]; then
             last=$((10#${BASH_REMATCH[2]}))
-            next=$((last + 1))
-            printf -v XX "%02d" "$next"
+            printf -v XX "%02d" $((last + 1))
           else
             XX="01"
           fi
