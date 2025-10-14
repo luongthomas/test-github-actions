@@ -40,6 +40,91 @@ jobs:
             echo "Unsupported source branch: ${GITHUB_REF_NAME}"
             exit 1
           fi
+      - name: Find existing PR for this direction (early)
+        id: pr_this_dir
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # HEAD_BRANCH / BASE_BRANCH already set by your previous step
+          PR_JSON="$(gh pr list --base "${BASE_BRANCH}" --head "${HEAD_BRANCH}" --state open --json number,title 2>/dev/null || echo '[]')"
+          if [[ "$(echo "$PR_JSON" | jq 'length')" -gt 0 ]]; then
+            echo "number=$(echo "$PR_JSON" | jq -r '.[0].number')" >> $GITHUB_OUTPUT
+            echo "title=$(echo "$PR_JSON" | jq -r '.[0].title')"  >> $GITHUB_OUTPUT
+          fi
+      - name: Compute counter and title (preserve if PR exists)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          YEAR=2025  # or YEAR=$(date +'%Y')
+
+          # If a PR in this direction already exists, KEEP its [YEAR.XX]
+          if [[ -n "${{ steps.pr_this_dir.outputs.number }}" ]]; then
+            existing_title="${{ steps.pr_this_dir.outputs.title }}"
+            if [[ "$existing_title" =~ \[(${YEAR})\.([0-9]{2})\] ]]; then
+              XX="${BASH_REMATCH[2]}"
+              # Rebuild title using the same XX (in case the prefix changed)
+              if [[ "${HEAD_BRANCH}" == "development" ]]; then
+                echo "PR_TITLE=Development -> Pre-Production [${YEAR}.${XX}]" >> $GITHUB_ENV
+              else
+                echo "PR_TITLE=Pre-Production -> Production [${YEAR}.${XX}]" >> $GITHUB_ENV
+              fi
+              exit 0
+            fi
+          fi
+
+          # Otherwise, compute as before:
+          # 1) If mirror PR is open, mirror its XX
+          if [[ "${HEAD_BRANCH}" == "development" ]]; then
+            TITLE_PREFIX="Development -> Pre-Production"
+            MIRROR_BASE="production"
+            MIRROR_HEAD="pre-production"
+          else
+            TITLE_PREFIX="Pre-Production -> Production"
+            MIRROR_BASE="pre-production"
+            MIRROR_HEAD="development"
+          fi
+
+          mirror_title="$(gh pr list --base "$MIRROR_BASE" --head "$MIRROR_HEAD" --state open --json title -q '.[0].title' 2>/dev/null || true)"
+          if [[ -n "$mirror_title" ]] && [[ "$mirror_title" =~ \[(${YEAR})\.([0-9]{2})\] ]]; then
+            XX="${BASH_REMATCH[2]}"
+            echo "PR_TITLE=${TITLE_PREFIX} [${YEAR}.${XX}]" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # 2) Else, find latest used this year and increment
+          latest_title="$(
+            gh search prs \
+              --repo "$GITHUB_REPOSITORY" \
+              --match title \
+              --json title \
+              --limit 1 \
+              --sort created \
+              --order desc \
+              --jq '.[0].title // empty' \
+              -- "[${YEAR}.*]" 2>/dev/null || :
+          )"
+          if [[ -z "$latest_title" ]]; then
+            latest_title="$(
+              gh pr list --state all --limit 100 --json title --jq '.[].title' 2>/dev/null \
+              | grep -E "\[${YEAR}\.[0-9]{2}\]" | head -n1 || :
+            )"
+          fi
+
+          if [[ -n "$latest_title" ]] && [[ "$latest_title" =~ \[(${YEAR})\.([0-9]{2})\] ]]; then
+            last=$((10#${BASH_REMATCH[2]}))
+            printf -v XX "%02d" $((last + 1))
+          else
+            XX="01"
+          fi
+
+          echo "PR_TITLE=${TITLE_PREFIX} [${YEAR}.${XX}]" >> $GITHUB_ENV
+
+
 
       - name: Fetch both branches
         run: |
@@ -67,22 +152,87 @@ jobs:
           exit 0
 
       # 4) Build body with “latest commit message per file”
-      - name: Generate PR body
+            # 4) Build body grouped by latest commit message per file
+      - name: Generate PR body (group by commit message, with subsections)
         id: body
+        shell: bash
         run: |
-          BODY="## Description
-            <!-- What does this PR change? Why? -->
+          set -euo pipefail
 
-            ## Changed files (latest commit per file)"
+          mkdir -p .grp_msgs .grp_files
+          ORDER=()
 
+          # Group files by their latest commit subject
           while IFS= read -r f; do
             [[ -z "$f" ]] && continue
-            msg=$(git log -1 --pretty=format:"%s" -- "$f" 2>/dev/null || echo "")
-            BODY+="\n- $f — $msg"
+            msg=$(git log -1 --pretty=format:%s -- "$f" 2>/dev/null || echo "")
+            [[ -z "$msg" ]] && msg="(no commit message)"
+            key=$(printf "%s" "$msg" | sha1sum | awk '{print $1}')
+
+            if [[ ! -f ".grp_msgs/$key.txt" ]]; then
+              printf "%s" "$msg" > ".grp_msgs/$key.txt"
+              ORDER+=("$key")
+            fi
+            printf "%s\n" "$f" >> ".grp_files/$key.txt"
           done < changed_files.txt
 
+          BODY=""
+
+          for key in "${ORDER[@]}"; do
+            msg=$(cat ".grp_msgs/$key.txt")
+            BODY+=$'\n## '"${msg}"$'\n'
+
+            # Deduplicate while preserving order
+            deduped=$(awk '!seen[$0]++' ".grp_files/$key.txt" || true)
+
+            # Buckets
+            automations=()
+            playbooks=()
+            other=()
+
+            while IFS= read -r file; do
+              [[ -z "$file" ]] && continue
+              base="$(basename "$file")"
+              if [[ "$base" == automation* ]]; then
+                automations+=("$file")
+              elif [[ "$base" == playbook* ]]; then
+                playbooks+=("$file")
+              else
+                other+=("$file")
+              fi
+            done <<< "$deduped"
+
+            # Emit subsections only if they have entries
+            if (( ${#automations[@]} )); then
+              BODY+=$'\nAutomations:\n'
+              for f in "${automations[@]}"; do
+                BODY+=$'- '"${f}"$'\n'
+              done
+            fi
+
+            if (( ${#playbooks[@]} )); then
+              BODY+=$'\nPlaybooks:\n'
+              for f in "${playbooks[@]}"; do
+                BODY+=$'- '"${f}"$'\n'
+              done
+            fi
+
+            if (( ${#other[@]} )); then
+              BODY+=$'\nOther:\n'
+              for f in "${other[@]}"; do
+                BODY+=$'- '"${f}"$'\n'
+              done
+            fi
+
+            # Separator with TWO newlines after it
+            BODY+=$'\n---\n\n'
+          done
+
+          # Remove trailing separator block if present (the final '---' and following blank lines)
+          BODY="$(printf '%s' "$BODY" | sed -E ':a;N;$!ba;s/\n---\n\n$//')"
+
           echo "text<<EOF" >> $GITHUB_OUTPUT
-          echo -e "$BODY" >> $GITHUB_OUTPUT
+          printf "%s\n" "$BODY" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
       # 5) Create or update PR using gh (real branch→branch PRs)
